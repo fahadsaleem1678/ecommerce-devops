@@ -1,0 +1,124 @@
+# ================================================================
+#  Docker Compose — Containerised E-Commerce Platform
+#  Services: nginx · frontend · backend · postgres · redis
+# ================================================================
+
+# ── Named network ─────────────────────────────────────────────
+networks:
+  ecommerce-net:
+    driver: bridge
+
+# ── Persistent volumes ────────────────────────────────────────
+volumes:
+  postgres_data:
+  redis_data:
+
+# ── Services ──────────────────────────────────────────────────
+services:
+
+  # ──────────────────────────────────────────────────────────
+  # Nginx — Public entry point / reverse proxy (port 80)
+  # Routes:  /api/*  → backend
+  #          /*      → frontend
+  # ──────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: ecommerce-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - ecommerce-net
+    depends_on:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ──────────────────────────────────────────────────────────
+  # Frontend — React SPA served by nginx:alpine (multi-stage)
+  # ──────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: dockerfile
+    container_name: ecommerce-frontend
+    restart: unless-stopped
+    networks:
+      - ecommerce-net
+    depends_on:
+      - backend
+
+  # ──────────────────────────────────────────────────────────
+  # Backend — Node.js + Express REST API
+  # ──────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ecommerce-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PORT=5000
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - REDIS_URL=redis://redis:6379
+    networks:
+      - ecommerce-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # ──────────────────────────────────────────────────────────
+  # PostgreSQL — Relational database (data persisted via volume)
+  # ──────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16
+    container_name: ecommerce-postgres
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - ecommerce-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ──────────────────────────────────────────────────────────
+  # Redis — In-memory cache (cart sessions, 7-day TTL)
+  # ──────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: ecommerce-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - ecommerce-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
